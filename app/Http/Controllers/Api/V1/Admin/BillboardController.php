@@ -6,9 +6,14 @@ namespace App\Http\Controllers\Api\V1\Admin;
 
 use App\Models\Billboard;
 use App\Models\BillboardCategory;
+use App\Models\BillboardPhoto;
+use App\Models\BillboardPricing;
+use Exception;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 final class BillboardController
@@ -25,7 +30,7 @@ final class BillboardController
             ->addSelect(DB::raw('ST_Y(location::geometry) as lat'))
             ->latest()
             ->get()
-            ->map(fn (Billboard $b) => $this->format($b));
+            ->map(fn (Billboard $b): array => $this->format($b));
 
         return response()->json([
             'message' => 'Billboards retrieved',
@@ -61,7 +66,7 @@ final class BillboardController
 
         // Auto-generate code unik jika tidak dikirim dari frontend
         if (empty($data['code'])) {
-            $data['code'] = 'BBD-'.mb_strtoupper(mb_substr(uniqid(), -6));
+            $data['code'] = 'BBD-'.mb_strtoupper(Str::random(6));
         }
 
         // Gunakan kategori pertama sebagai default jika tidak dipilih
@@ -75,6 +80,9 @@ final class BillboardController
         $size = $data['size'] ?? null;
         $priceLabel = $data['price_label'] ?? null;
         $priceMonth = isset($data['price_per_month']) ? (float) $data['price_per_month'] : 0;
+        if ($priceMonth <= 0 && $priceLabel) {
+            $priceMonth = $this->parsePriceLabel($priceLabel);
+        }
         unset($data['lat'], $data['lng'], $data['size'], $data['price_label'], $data['price_per_month']);
 
         // Simpan ukuran di description jika belum ada description
@@ -82,28 +90,24 @@ final class BillboardController
             $data['description'] = "Ukuran: {$size}".($priceLabel ? " | Harga: {$priceLabel}" : '');
         }
 
-        $billboard = Billboard::create([
+        $billboard = Billboard::query()->create([
             ...$data,
             'location' => DB::raw(
                 "ST_SetSRID(ST_MakePoint({$lng}, {$lat}), 4326)::geography"
             ),
         ]);
 
-        // Buat record pricing jika ada harga
-        if ($priceMonth > 0 || $size) {
-            \App\Models\BillboardPricing::create([
-                'billboard_id' => $billboard->id,
-                'price_per_month' => $priceMonth,
-                'price_per_day' => round($priceMonth / 30, 2),
-                'price_per_week' => round($priceMonth / 4, 2),
-                'price_per_year' => round($priceMonth * 12, 2),
-                'is_active' => true,
-            ]);
+        if ($priceMonth > 0) {
+            $this->upsertBillboardPricing($billboard->id, $priceMonth);
+        }
+
+        if ($size) {
+            $this->upsertBillboardSize($billboard->id, $size);
         }
 
         return response()->json([
             'message' => 'Billboard berhasil ditambahkan',
-            'data'    => $this->format(
+            'data' => $this->format(
                 Billboard::query()
                     ->with(['category', 'activePricing', 'photos'])
                     ->select('*')
@@ -137,7 +141,7 @@ final class BillboardController
      */
     public function update(Request $request, string $id): JsonResponse
     {
-        $billboard = Billboard::findOrFail($id);
+        $billboard = Billboard::query()->findOrFail($id);
 
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:150'],
@@ -154,7 +158,18 @@ final class BillboardController
             'is_illuminated' => ['boolean'],
             'is_active' => ['boolean'],
             'is_featured' => ['boolean'],
+            'size' => ['nullable', 'string', 'max:20'],
+            'price_label' => ['nullable', 'string', 'max:100'],
+            'price_per_month' => ['nullable', 'numeric', 'min:0'],
         ]);
+
+        $size = $data['size'] ?? null;
+        $priceLabel = $data['price_label'] ?? null;
+        $priceMonth = isset($data['price_per_month']) ? (float) $data['price_per_month'] : 0;
+        if ($priceMonth <= 0 && $priceLabel) {
+            $priceMonth = $this->parsePriceLabel($priceLabel);
+        }
+        unset($data['size'], $data['price_label'], $data['price_per_month']);
 
         if (isset($data['lat'], $data['lng'])) {
             $lat = (float) $data['lat'];
@@ -170,9 +185,23 @@ final class BillboardController
 
         $billboard->update($data);
 
+        if ($size) {
+            $this->upsertBillboardSize($billboard->id, $size);
+
+            if (empty($billboard->description) || str_starts_with((string) $billboard->description, 'Ukuran:')) {
+                $billboard->update([
+                    'description' => 'Ukuran: '.$size.($priceLabel ? ' | Harga: '.$priceLabel : ''),
+                ]);
+            }
+        }
+
+        if ($priceMonth > 0) {
+            $this->upsertBillboardPricing($billboard->id, $priceMonth);
+        }
+
         return response()->json([
             'message' => 'Billboard berhasil diperbarui',
-            'data'    => $this->format(
+            'data' => $this->format(
                 Billboard::query()
                     ->with(['category', 'activePricing', 'photos'])
                     ->select('*')
@@ -189,21 +218,23 @@ final class BillboardController
     public function destroy(string $id): JsonResponse
     {
         try {
-            $billboard = Billboard::findOrFail($id);
+            $billboard = Billboard::query()->findOrFail($id);
 
-            DB::transaction(function () use ($billboard) {
-                // Hapus harga terkait agar tidak terjadi foreign key constraint error
+            DB::transaction(function () use ($billboard): void {
+                // Hapus harga dan foto terkait agar tidak terjadi foreign key constraint error
                 $billboard->pricings()->delete();
+                $billboard->photos()->delete();
+                $billboard->rentals()->delete();
                 $billboard->delete();
             });
 
             return response()->json(['message' => 'Billboard berhasil dihapus']);
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+        } catch (ModelNotFoundException) {
             return response()->json(['message' => 'Billboard tidak ditemukan'], 404);
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             return response()->json([
                 'message' => 'Gagal menghapus billboard. Pastikan tidak ada data yang masih terhubung.',
-                'error'   => $e->getMessage()
+                'error' => $e->getMessage(),
             ], 400);
         }
     }
@@ -213,7 +244,7 @@ final class BillboardController
      */
     public function uploadPhoto(Request $request, string $id): JsonResponse
     {
-        $billboard = Billboard::findOrFail($id);
+        $billboard = Billboard::query()->findOrFail($id);
 
         $request->validate([
             'photo' => ['required', 'image', 'mimes:jpeg,png,jpg,webp', 'max:5120'], // max 5MB
@@ -222,11 +253,11 @@ final class BillboardController
         if ($request->hasFile('photo')) {
             $file = $request->file('photo');
             $path = $file->store('billboards', 'public');
-            
-            // Generate full URL
-            $url = url('storage/' . $path);
 
-            $photo = \App\Models\BillboardPhoto::create([
+            // Generate full URL
+            $url = url('storage/'.$path);
+
+            $photo = BillboardPhoto::query()->create([
                 'billboard_id' => $billboard->id,
                 'photo_url' => $url,
                 'is_primary' => $billboard->photos()->count() === 0, // Set as primary if it's the first photo
@@ -283,5 +314,84 @@ final class BillboardController
             'photo_url' => $primaryPhoto ? $primaryPhoto->photo_url : null,
             'created_at' => $billboard->created_at,
         ];
+    }
+
+    private function parsePriceLabel(string $priceLabel): float
+    {
+        $normalized = mb_strtolower($priceLabel);
+        $number = 0.0;
+
+        if (preg_match('/(\d+([\.,]\d+)?)/', $normalized, $matches) === 1) {
+            $raw = str_replace(['.', ','], ['', '.'], $matches[1]);
+            $number = (float) $raw;
+        }
+
+        if ($number <= 0) {
+            return 0.0;
+        }
+
+        if (str_contains($normalized, 'miliar')) {
+            $number *= 1000000000;
+        } elseif (str_contains($normalized, 'juta')) {
+            $number *= 1000000;
+        }
+
+        if (preg_match('/(\d+)\s*bulan/', $normalized, $periodMatches) === 1) {
+            $months = (int) $periodMatches[1];
+            if ($months > 0) {
+                $number /= $months;
+            }
+        }
+
+        return $number;
+    }
+
+    private function upsertBillboardPricing(string $billboardId, float $pricePerMonth): void
+    {
+        BillboardPricing::query()->updateOrCreate(
+            ['billboard_id' => $billboardId, 'is_active' => true],
+            [
+                'price_per_month' => $pricePerMonth,
+                'price_per_day' => round($pricePerMonth / 30, 2),
+                'price_per_week' => round($pricePerMonth / 4, 2),
+                'price_per_year' => round($pricePerMonth * 12, 2),
+            ]
+        );
+    }
+
+    private function upsertBillboardSize(string $billboardId, string $sizeLabel): void
+    {
+        $sizeParts = explode('x', $sizeLabel);
+        $width = isset($sizeParts[0]) ? (float) $sizeParts[0] : 0.0;
+        $height = isset($sizeParts[1]) ? (float) $sizeParts[1] : 0.0;
+
+        $existingSize = DB::table('billboard_sizes')
+            ->where('billboard_id', $billboardId)
+            ->where('is_primary', true)
+            ->first();
+
+        $payload = [
+            'label' => $sizeLabel.'m',
+            'width_m' => $width,
+            'height_m' => $height,
+            'area_m2' => round($width * $height, 2),
+            'updated_at' => now(),
+        ];
+
+        if ($existingSize === null) {
+            DB::table('billboard_sizes')->insert([
+                'id' => (string) Str::uuid(),
+                'billboard_id' => $billboardId,
+                'is_primary' => true,
+                'created_at' => now(),
+                ...$payload,
+            ]);
+
+            return;
+        }
+
+        DB::table('billboard_sizes')
+            ->where('id', $existingSize->id)
+            ->update($payload);
     }
 }

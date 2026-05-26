@@ -24,7 +24,7 @@ final class BillboardController
         $keyword = $request->query('q');
 
         $query = Billboard::query()
-            ->with(['activePricing'])
+            ->with(['activePricing', 'category'])
             ->select('*')
             ->addSelect(DB::raw('ST_X(location::geometry) as longitude'))
             ->addSelect(DB::raw('ST_Y(location::geometry) as latitude'))
@@ -41,7 +41,7 @@ final class BillboardController
 
         // Keyword Search
         if ($keyword) {
-            $query->where(function (Builder $q) use ($keyword) {
+            $query->where(function (Builder $q) use ($keyword): void {
                 $q->where('name', 'ilike', "%{$keyword}%")
                     ->orWhere('address', 'ilike', "%{$keyword}%")
                     ->orWhere('district', 'ilike', "%{$keyword}%");
@@ -62,7 +62,7 @@ final class BillboardController
     public function show(string $id): JsonResponse
     {
         $billboard = Billboard::query()
-            ->with(['activePricing'])
+            ->with(['activePricing', 'category'])
             ->select('*')
             ->addSelect(DB::raw('ST_X(location::geometry) as longitude'))
             ->addSelect(DB::raw('ST_Y(location::geometry) as latitude'))

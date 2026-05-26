@@ -30,7 +30,7 @@ final class BookingController
             $query->where('status', $status);
         }
 
-        $bookings = $query->latest()->get()->map(function (Booking $booking) {
+        $bookings = $query->latest()->get()->map(function (Booking $booking): array {
             $paymentStatus = $booking->payments->last()?->status ?? 'unpaid';
             $clientName = $booking->user->company?->name ?? $booking->user->name;
 
