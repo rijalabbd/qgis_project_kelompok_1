@@ -28,8 +28,7 @@ import {
     XCircle,
     History,
     Plus,
-    Edit2,
-    Trash2,
+
 } from "lucide-react";
 import {
     useReactTable,
@@ -300,19 +299,19 @@ export default function RentalsPage() {
     const stats = [
         {
             label: "Penyewaan Aktif",
-            value: "38",
+            value: rentals.filter((r) => r.status === "Active").length.toString(),
             icon: Calendar,
             color: "text-blue-600",
         },
         {
             label: "Pending Pembayaran",
-            value: "5",
+            value: rentals.filter((r) => r.payment === "Unpaid").length.toString(),
             icon: DollarSign,
             color: "text-orange-600",
         },
         {
             label: "Selesai Bulan Ini",
-            value: "12",
+            value: rentals.filter((r) => r.status === "Completed").length.toString(),
             icon: CheckCircle,
             color: "text-green-600",
         },

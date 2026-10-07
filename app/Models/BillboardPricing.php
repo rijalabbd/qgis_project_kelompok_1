@@ -30,13 +30,19 @@ final class BillboardPricing extends Model
         'updated_by',
     ];
 
-    protected $casts = [
-        'price_per_month' => 'decimal:2',
-        'price_per_day' => 'decimal:2',
-        'price_per_week' => 'decimal:2',
-        'price_per_year' => 'decimal:2',
-        'is_active' => 'boolean',
-    ];
+    /**
+     * @return array<string, string>
+     */
+    public function casts(): array
+    {
+        return [
+            'price_per_month' => 'decimal:2',
+            'price_per_day' => 'decimal:2',
+            'price_per_week' => 'decimal:2',
+            'price_per_year' => 'decimal:2',
+            'is_active' => 'boolean',
+        ];
+    }
 
     /**
      * @return BelongsTo<Billboard, $this>
